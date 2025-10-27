@@ -3,7 +3,8 @@ name: Deploy Node App to EC2 (Docker)
 on:
   push:
     branches:
-      - main  # or master
+      - main  # auto-deploy when pushing to main
+  workflow_dispatch:  # 👈 manual trigger from GitHub Actions tab
 
 jobs:
   deploy:
