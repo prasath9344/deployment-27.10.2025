@@ -1,70 +1,62 @@
-name: Deploy Node App to EC2 (Docker)
+name: Deploy to EC2 via Docker
 
 on:
   push:
     branches:
-      - dev  # auto-deploy when pushing to main
-  workflow_dispatch:  # 👈 manual trigger from GitHub Actions tab
+      - main  # deploy when main branch updates
+      - dev   #add your current branch
+  workflow_dispatch:  # allows manual trigger from Actions tab
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout source code
+        uses: actions/checkout@v3
 
-      - name: Create PEM file
+      - name: Build Docker image
         run: |
-           echo "${{ secrets.EC2_KEY }}" | tr -d '\r' > private_key.pem
-           chmod 600 private_key.pem
+          docker build -t myapp .
 
-      - name: Deploy to EC2
-        run: |
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-            # Create app folder
-            mkdir -p ~/nodeapp
-          EOF
+      - name: Save Docker image as tar
+        run: docker save myapp > myapp.tar
 
-      - name: Copy project files to EC2
-        run: |
-          scp -o StrictHostKeyChecking=no -i private_key.pem -r ./* ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/nodeapp/
+      - name: Copy Docker image to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "myapp.tar"
+          target: "~/app/"
 
-      - name: Build and Run Docker on EC2
-        run: |
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-            cd ~/nodeapp
 
-            # ------------------------------
-            # 🐳 Install Docker if not exists
-            # ------------------------------
-            if ! command -v docker &> /dev/null
-            then
-              echo "Docker not found. Installing..."
-              sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg
-              sudo install -m 0755 -d /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-                https://download.docker.com/linux/ubuntu \
-                $(lsb_release -cs) stable" | \
-                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-              sudo usermod -aG docker $USER
-            fi
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          
+          port: 22
+          script: |
+              # Add user to docker group (if not already added)
+              sudo usermod -aG docker $USER || true
 
-            # ------------------------------
-            # 🧹 Clean up old container/image
-            # ------------------------------
-            docker stop node-app || true
-            docker rm node-app || true
-            docker rmi node-app:latest || true
+              # Install Docker if not present
+              if ! command -v docker &> /dev/null; then
+                echo "Installing Docker..."
+                sudo apt-get update -y
+                sudo apt-get install -y docker.io
+                sudo systemctl enable docker
+                sudo systemctl start docker
+              fi
 
-            # ------------------------------
-            # 🏗️ Build and run container
-            # ------------------------------
-            docker build -t node-app .
-            docker run -d -p 3000:3000 --name node-app node-app:latest
-          EOF
+              # Deploy container
+              mkdir -p ~/app
+              cd ~/app
+              sudo docker load < myapp.tar
+              sudo docker stop myapp || true
+              sudo docker rm myapp || true
+              sudo docker run -d -p 3000:3000 --name myapp myapp
